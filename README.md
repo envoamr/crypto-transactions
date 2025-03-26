@@ -89,7 +89,10 @@ The third group handles data cleaning and transformation:
 Overall, this is how the flow looks like:
 
 ![image](img/etl-pipeline-trigger1.png)
+
 ![image](img/etl-pipeline-trigger2.png)
+
+![image](img/etl-pipeline-trigger3.png)
 
 ### Secrets (KV Store)
 
