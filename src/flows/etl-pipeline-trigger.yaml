@@ -1,0 +1,120 @@
+id: etl-pipeline-trigger
+namespace: de-zoomcamp-crypto
+
+inputs:
+  - id: extract_btc_prices
+    type: BOOLEAN
+    required: true
+    defaults: false
+    description: "Whether to run the BTC Prices workflow"
+  - id: extract_btc_transactions
+    type: BOOLEAN
+    required: true
+    defaults: false
+    description: "Whether to run the BTC Transactions workflow"
+  - id: submit_pyspark_job
+    type: BOOLEAN
+    required: true
+    defaults: false
+    description: "Whether to submit the PySpark job to load the data into BigQuery"
+  - id: is_backfill
+    type: BOOLEAN
+    required: true
+    defaults: false
+    description: "Whether the current run is a backfill"
+
+variables:
+  input_date: "{{ trigger.previous | date('yyyy-MM-dd') }}"
+  btc_prices_frequency: "15m" # 15m, 1h, 4h, 1d
+  btc_prices_file: "btc_prices_{{ vars.input_date }}_{{ vars.btc_prices_frequency }}.parquet"
+  btc_prices_gcs_file: "gs://{{ kv('GCP_BUCKET_NAME') }}/btc_prices/{{ vars.input_date }}/{{ vars.btc_prices_file }}"
+  btc_transactions_gcs_file: "gs://{{ kv('GCP_BUCKET_NAME') }}/btc_transactions/{{ vars.input_date }}/btc_transactions_{{ vars.input_date }}"
+  btc_transactions_public_table: bigquery-public-data.crypto_bitcoin.transactions
+
+tasks:
+  - id: if_extract_btc_prices
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.extract_btc_prices == true }}"
+    then:
+      - id: fetch_btc_prices_data
+        type: io.kestra.plugin.scripts.python.Script
+        warningOnStdErr: false
+        beforeCommands:
+          - pip install kagglehub pandas fastparquet
+        script: |
+          import kagglehub
+          import pandas as pd
+          from datetime import datetime
+
+          DATASET_NAME = "novandraanugrah/bitcoin-historical-datasets-2018-2024"
+          FREQUENCY = "{{ render(vars.btc_prices_frequency) }}"
+          INPUT_DATE = "{{ render(vars.input_date) }}"
+          API_FILE_NAME = f"btc_{FREQUENCY}_data_2018_to_2025.csv"
+          OUTPUT_FILE_NAME = "{{ render(vars.btc_prices_file) }}"
+
+          btc_prices_csv = kagglehub.dataset_download(DATASET_NAME, API_FILE_NAME)
+          df_btc_prices = pd.read_csv(btc_prices_csv)
+          df_btc_prices_date = df_btc_prices[df_btc_prices['Open time'].str.contains(INPUT_DATE)]
+          df_btc_prices_date.to_parquet(OUTPUT_FILE_NAME)
+        outputFiles:
+          - "*.parquet"
+
+      - id: upload_btc_prices_data
+        type: io.kestra.plugin.gcp.gcs.Upload
+        from: "{{ outputs.fetch_btc_prices_data.outputFiles[render(vars.btc_prices_file)]}}"
+        to: "{{ render(vars.btc_prices_gcs_file)}}"
+
+  - id: if_extract_btc_transactions
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.extract_btc_transactions == true }}"
+    then:
+      - id: export_btc_transactions_to_gcs
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          EXPORT DATA OPTIONS(
+            uri='{{ render(vars.btc_transactions_gcs_file) }}-*.parquet',
+            format='PARQUET',
+            overwrite=true
+          ) AS
+          SELECT *
+          FROM `{{ render(vars.btc_transactions_public_table) }}`
+          WHERE block_timestamp_month = DATE_TRUNC(DATE('{{ render(vars.input_date) }}'), MONTH)
+            AND DATE(block_timestamp) = '{{ render(vars.input_date) }}';
+        location: US
+
+  - id: if_submit_pyspark_job
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.submit_pyspark_job == true }}"
+    then:
+      - id: submit_pyspark_job
+        type: io.kestra.plugin.gcp.dataproc.batches.PySparkSubmit
+        mainPythonFileUri: "gs://{{ kv('GCP_BUCKET_NAME') }}/scripts/pyspark-transform-crypto.py"
+        args:
+        - "--input_date={{ render(vars.input_date) }}"
+        - "--projectid={{ kv('GCP_PROJECT_ID') }}"
+        - "--bq_dataset={{ kv('GCP_DATASET') }}"
+        - "--bucket={{ kv('GCP_BUCKET_NAME') }}"
+        - "--frequency={{ render(vars.btc_prices_frequency) }}"
+        name: test-pyspark
+        region: northamerica-northeast2
+        runtime:
+          version: "2.2"
+      
+      - id: if_is_backfill
+        type: io.kestra.plugin.core.flow.If
+        condition: "{{ inputs.is_backfill == true }}"
+        then:
+        - id: pause
+          type: io.kestra.plugin.core.flow.Pause
+          delay: "120"
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      projectId: "{{ kv('GCP_PROJECT_ID') }}"
+      bucket: "{{ kv('GCP_BUCKET_NAME') }}"
+
+triggers:
+  - id: run_pipeline
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 3 * * *"

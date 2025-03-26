@@ -1,0 +1,106 @@
+id: etl-pipeline
+namespace: de-zoomcamp-crypto
+
+inputs:
+  - id: extract_btc_prices
+    type: BOOLEAN
+    required: true
+    defaults: false
+    description: "Whether to run the BTC Prices workflow"
+  - id: extract_btc_transactions
+    type: BOOLEAN
+    required: true
+    defaults: false
+    description: "Whether to run the BTC Transactions workflow"
+  - id: submit_pyspark_job
+    type: BOOLEAN
+    required: true
+    defaults: false
+    description: "Whether to submit the PySpark job to load the data into BigQuery"
+  - id: date
+    type: STRING
+    required: true
+    defaults: 2025-03-10
+    description: "The date in format YYYY-MM-DD"
+
+variables:
+  btc_prices_frequency: "15m" # 15m, 1h, 4h, 1d
+  btc_prices_file: "btc_prices_{{ inputs.date }}_{{ vars.btc_prices_frequency }}.parquet"
+  btc_prices_gcs_file: "gs://{{ kv('GCP_BUCKET_NAME') }}/btc_prices/{{ inputs.date }}/{{ vars.btc_prices_file }}"
+  btc_transactions_gcs_file: "gs://{{ kv('GCP_BUCKET_NAME') }}/btc_transactions/{{ inputs.date }}/btc_transactions_{{ inputs.date }}"
+  btc_transactions_public_table: bigquery-public-data.crypto_bitcoin.transactions
+
+tasks:
+  - id: if_extract_btc_prices
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.extract_btc_prices == true }}"
+    then:
+      - id: fetch_btc_prices_data
+        type: io.kestra.plugin.scripts.python.Script
+        warningOnStdErr: false
+        beforeCommands:
+          - pip install kagglehub pandas fastparquet
+        script: |
+          import kagglehub
+          import pandas as pd
+          from datetime import datetime
+
+          DATASET_NAME = "novandraanugrah/bitcoin-historical-datasets-2018-2024"
+          FREQUENCY = "{{ render(vars.btc_prices_frequency) }}"
+          INPUT_DATE = "{{ inputs.date }}"
+          API_FILE_NAME = f"btc_{FREQUENCY}_data_2018_to_2025.csv"
+          OUTPUT_FILE_NAME = "{{ render(vars.btc_prices_file) }}"
+
+          btc_prices_csv = kagglehub.dataset_download(DATASET_NAME, API_FILE_NAME)
+          df_btc_prices = pd.read_csv(btc_prices_csv)
+          df_btc_prices_date = df_btc_prices[df_btc_prices['Open time'].str.contains(INPUT_DATE)]
+          df_btc_prices_date.to_parquet(OUTPUT_FILE_NAME)
+        outputFiles:
+          - "*.parquet"
+
+      - id: upload_btc_prices_data
+        type: io.kestra.plugin.gcp.gcs.Upload
+        from: "{{ outputs.fetch_btc_prices_data.outputFiles[render(vars.btc_prices_file)]}}"
+        to: "{{ render(vars.btc_prices_gcs_file)}}"
+
+  - id: if_extract_btc_transactions
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.extract_btc_transactions == true }}"
+    then:
+      - id: export_btc_transactions_to_gcs
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          EXPORT DATA OPTIONS(
+            uri='{{ render(vars.btc_transactions_gcs_file) }}-*.parquet',
+            format='PARQUET',
+            overwrite=true
+          ) AS
+          SELECT *
+          FROM `{{ render(vars.btc_transactions_public_table) }}`
+          WHERE block_timestamp_month = DATE_TRUNC(DATE('{{inputs.date}}'), MONTH)
+            AND DATE(block_timestamp) = '{{inputs.date}}';
+        location: US
+
+  - id: if_submit_pyspark_job
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{ inputs.submit_pyspark_job == true }}"
+    then:
+      - id: submit_pyspark_job
+        type: io.kestra.plugin.gcp.dataproc.batches.PySparkSubmit
+        mainPythonFileUri: "gs://{{ kv('GCP_BUCKET_NAME') }}/scripts/pyspark-transform-crypto.py"
+        args:
+        - "--input_date={{inputs.date}}"
+        - "--projectid={{ kv('GCP_PROJECT_ID') }}"
+        - "--bq_dataset={{ kv('GCP_DATASET') }}"
+        - "--bucket={{ kv('GCP_BUCKET_NAME') }}"
+        - "--frequency={{ render(vars.btc_prices_frequency) }}"
+        name: test-pyspark
+        region: northamerica-northeast2
+        runtime:
+          version: "2.2"
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      projectId: "{{ kv('GCP_PROJECT_ID') }}"
+      bucket: "{{ kv('GCP_BUCKET_NAME') }}"

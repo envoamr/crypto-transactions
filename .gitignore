@@ -1,0 +1,4 @@
+venv/
+*.tfstate*
+.terraform
+.terraform.lock*
