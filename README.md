@@ -2,6 +2,27 @@
 
 This project, developed for the Data Engineering Zoomcamp 2025 Cohort, ingests cryptocurrency activity data in batches and produces a dashboard for analysis.
 
+- [Crypto Transaction Analysis](#crypto-transaction-analysis)
+  - [Problem Statement](#problem-statement)
+  - [Disclaimer](#disclaimer)
+  - [Data Sources](#data-sources)
+    - [Market Trade Prices](#market-trade-prices)
+    - [On-chain Transactions](#on-chain-transactions)
+  - [Data Pipeline Overview](#data-pipeline-overview)
+  - [Terraform (Infrastructure as Code)](#terraform-infrastructure-as-code)
+    - [Resources created](#resources-created)
+    - [Creating Resources (reproducibility)](#creating-resources-reproducibility)
+  - [Kestra (Workflow Orchestration)](#kestra-workflow-orchestration)
+    - [Kestra Tasks](#kestra-tasks)
+    - [Secrets (KV Store)](#secrets-kv-store)
+    - [Backfill (reproducibility)](#backfill-reproducibility)
+  - [PySpark (Data Transformations)](#pyspark-data-transformations)
+    - [Partitioning/Clustering](#partitioningclustering)
+    - [Run (reproducibility)](#run-reproducibility)
+  - [Looker Studio (Dashboard)](#looker-studio-dashboard)
+  - [Conclusion](#conclusion)
+
+
 ## Problem Statement
 
 To fully understand the cryptocurrency market, we need to uncover the patterns connecting on-chain transaction activity and market trading. Similar to how a company's sales data can influence its stock price, this project analyzes the correlation between blockchain transaction data and exchange trading data to determine if a comparable relationship exists for cryptocurrencies.
