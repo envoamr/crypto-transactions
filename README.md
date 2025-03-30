@@ -19,9 +19,9 @@ This project, developed for the Data Engineering Zoomcamp 2025 Cohort, ingests c
   - [PySpark (Data Transformations)](#pyspark-data-transformations)
     - [Partitioning/Clustering](#partitioningclustering)
     - [Run (reproducibility)](#run-reproducibility)
+    - [Schema](#schema)
   - [Looker Studio (Dashboard)](#looker-studio-dashboard)
   - [Conclusion](#conclusion)
-
 
 ## Problem Statement
 
@@ -29,9 +29,9 @@ To fully understand the cryptocurrency market, we need to uncover the patterns c
 
 ## Disclaimer
 
-The dataset is nearly 4GB, with around 32 million rows covering a three-month period. While you’re welcome to reproduce this project, keep in mind that it comes with a cost. PySpark processes data day by day (spinning up a separate job for each day) rather than handling it all at once, which can quickly add up.
+The dataset is nearly 4GB, with around 32 million rows covering a three-month period. While you’re welcome to reproduce this project, keep in mind that it comes with a cost. During backfilling, PySpark processes data day by day (spinning up a separate job for each day) rather than handling it all at once, which can quickly add up.
 
-With that being said, if you do wish to reproduce this, you can follow along in the order the components of this pipeline appear in this documentation: Terraform, then Kestra, then PySpark, then the dashboard.
+With that being said, if you do wish to reproduce this, you can follow along in the order of this documentation: Terraform, then Kestra, then PySpark, then the dashboard.
 
 ## Data Sources
 
@@ -47,8 +47,6 @@ With that being said, if you do wish to reproduce this, you can follow along in 
 
 ![image](img/pipeline-diagram.png)
 
-Let's dive deeper into each component to understand the entire process. Feel free to follow along (after having read the [Disclaimer](#disclaimer)).
-
 ## Terraform (Infrastructure as Code)
 
 Terraform files `main.tf` and `variables.tf` are used to create resources on Google Cloud Platform. Change the text `<YOUR PROJECTID>` in the variables file to your project ID.
@@ -60,10 +58,10 @@ Terraform creates the following resources:
 1. Service Account that will be attached to the VM instance (that Kestra runs on) to give the neccessary permissions to interact with BigQuery and GCS.
 2. IAM Roles for the service account to give permissions to read/write to GCS, read/write the project's and Google's Public BigQuery datasets, submit jobs to Dataproc serverless (for PySpark).
 3. Firewall rule for resources with `kestra-vm` label to allow your computer's public IP address to connect to the VM instance and open the Kestra webpage.
-    - **Important**: Replace `<YOUR IP ADDRESS>` in the `source_ranges` option to be your public IP address (you can go to [https://api.ipify.org/](https://api.ipify.org/)). This is better than just using `0.0.0.0/0` as the latter allows any IP address with the right credentials to connect to Kestra, rather than restricting it to only your computer.
+    - **Important**: For the `source_ranges` setting, replace `<YOUR IP ADDRESS>` with either `0.0.0.0/0` (allowing connections from any IP) or your specific public IP address (found at https://api.ipify.org/). Using your public IP is strongly recommended for enhanced security, as it limits access to Kestra to only your machine, preventing unauthorized connections.
 4. VM Compute Instance `e2-medium` with 4GB ram and 20GB disk space labelled as `kestra-vm`. This is where Kestra, the workflow orchestrator, will be installed and run the daily pipeline.
 5. GCS bucket to represent the data lake used to store the raw data, as well upload the local PySpark script and Jar files to the bucket, which are used in a Pyspark job.
-6. BigQuery dataset, used to store fact and dimension tables. It also runs a SQL query to create two tables, `Fact_Transactions` and `Dim_MarketPrice`.
+6. BigQuery dataset, used to store fact and dimension tables. It also runs a SQL query to create two empty tables, `Fact_Transactions` and `Dim_MarketPrice`.
 
 ![image](img/tf-graph.png)
 
@@ -90,11 +88,11 @@ Since Kestra lives in the VM Compute Instance (that Terraform created), follow t
 - Download Docker and Docker Compose for Ubuntu
 - Upload the `docker-compose.yml` file onto the VM, either by cloning this repository, copy & pasting into a text file using `nano`/`vim`, or some other way. Change the text `<YOUR PASSWORD>` on line 47 in the docker compose file to something secretive, then start it using `docker-compose -d`.
 
-Once Kestra starts, copy the contents of the [etl-pipeline-trigger.yaml](src/flows/etl-pipeline-trigger.yaml) into a new flow. The namespace (or group of flows) it will be under is `de-zoomacamp-crypto`. 
+Once Kestra starts, copy the contents of the [etl-pipeline-trigger.yaml](src/flows/etl-pipeline-trigger.yaml) into a new flow. The namespace (that contains the group of flows) will be `de-zoomacamp-crypto`. 
 
 ### Kestra Tasks
 
-The [Kestra flow](src/flows/etl-pipeline-trigger.yaml) is composed of three groups of tasks:
+The [Kestra flow](src/flows/etl-pipeline-trigger.yaml) is composed of three groups of tasks. It also takes 4 inputs: whether to run the extraction of market prices data, to run the extraction of transactions data, to submit the PySpark job, and whether this is a backfill or not.
 
 The first two handle data ingestion:
 
@@ -106,6 +104,7 @@ The first two handle data ingestion:
 The third group handles data cleaning and transformation:
 
 3. If `submit_pyspark_job` is `true`, then submit a batch job to Dataproc Serverless with the file `gs://{{ kv('GCP_BUCKET_NAME') }}/scripts/pyspark-transform-crypto.py`, which is the same file that Terraform uploaded ([pyspark-transform-crypto.py](/src/scripts/pyspark-transform-crypto.py)). This script (more on it [later](#pyspark-data-transformations)) takes the files in the data lake, transforms them, and outputs them into BigQuery's data warehouse.
+   - if `is_backfill` is `true`, then pause the flow for 2 minutes. Since the project used the free GCP credits, there was a restriction for submitting Spark jobs right after one another.
 
 Overall, this is how the flow looks like:
 
@@ -124,9 +123,11 @@ You may have come across variables like `kv('GCP_BUCKET_NAME')`. These represent
 
 ![kestra's KV store](img/kv-store.png)
 
+Note: Since a service account with the correct permissions was created and attached to the VM instance (inside of Terraform), then there was no need to generate a credentials file and add for Kestra to use.
+
 ### Backfill (reproducibility)
 
-To reproduce the data as in the project, go to the Triggers section of the flow and backfill from January 1, 2025, until today's date (**important**, see [Disclaimer](#disclaimer)). During the development of this project, it took around 6 minutes for each day, which includes a 2 minute delay since PySpark jobs can't run right after the other or you might a `PERMISSION_DENIED: Insufficient project quota to satisfy request: resource` error. This equates to ~8 hours in total for the backfill. After that, it should run daily at 3am EST as long as the VM instance and the docker containers are still running. Although this (i.e. 8 hours) backfill takes longer than usual, it is meant to be a one time thing at the start, so it is understandable.
+To populate the data as demonstrated in the project, you need to perform a backfill. Navigate to the Triggers section of the flow and configure it to process data from January 1, 2025, up to today's date. Please note that this will trigger roughly 90 PySpark jobs, which will result in cloud resource usage and associated costs. (Refer to the Disclaimer for details). Due to potential quota limitations, a 2-minute delay is required between each PySpark job.  This results in an estimated 8-hour backfill duration.  Once completed, the flow will automatically execute daily at 3 AM EST, as long as the VM instance and Docker containers remain active. This is a one-time, initial setup process.
 
 ## PySpark (Data Transformations)
 
@@ -137,17 +138,23 @@ The script is dynamic and takes 5 arguments that are required whenever a job is 
 - --projectid={{ kv('GCP_PROJECT_ID') }}
 - --bq_dataset={{ kv('GCP_DATASET') }}
 - --bucket={{ kv('GCP_BUCKET_NAME') }}
-- --frequency={{ render(vars.btc_prices_frequency) }}
+- --frequency=15m or 1h or 4h or 1d
 
 ### Partitioning/Clustering
 
-Both tables, `Fact_Transactions` and `Dim_MarketPrice`, are updated daily and include time-based data, meaning they are partitioned by month. As of now, the dataset spans 3 months, resulting in 3 partitions. This partitioning can reduce data processing time by limiting queries to the relevant partitions.
+Both tables, `Fact_Transactions` and `Dim_MarketPrice`, are updated daily and include time-based data, meaning they are partitioned by month. `Fact_Transactions` is partitioned according to the column `block_timestamp_month` and `Dim_MarketPrice` is partitioned as per the column `timestamp_month`. As of writing, the dataset spans 3 months, resulting in 3 partitions. This partitioning can reduce data processing time by limiting queries to the relevant partitions.
 
-Additionally, both tables include cryptocurrency data. Currently, the dataset contains only Bitcoin, but the tables are clustered by cryptocurrency. This clustering ensures that related data is grouped together, further optimizing processing efficiency.
+Additionally, both tables include cryptocurrency data. Currently, the dataset contains only Bitcoin, but the tables are clustered by the column `cryptocurrency`. This clustering ensures that related data is grouped together, further optimizing processing efficiency.
 
 ### Run (reproducibility)
 
 The Python script used for the PySpark job is automatically uploaded from this repo to the GCS bucket during Terraform, and is automatically referenced by Kestra when Kestra is submitting a PySpark job to Dataproc. So as long as both are set up correctly as per the documentation, no intervention should be needed here.
+
+### Schema
+
+![alt text](img/schema_fact.png)
+
+![alt text](img/schema_dim.png)
 
 ## Looker Studio (Dashboard)
 
@@ -160,5 +167,5 @@ To put it all together, a dashboard was created. The dashboard consists of 2 vis
 ## Conclusion
 
 To revisit the goal of this project, which is to assess the correlation between transaction data and cryptocurrency market data, two findings were observed:
-1. There doesn't appear to be a consistent relationship between the number of transactions made in a day and the number of market trades on the same day. For example, on January 24, February 6, and March 2, there were spikes in market trades without a corresponding spike in the number of transactions. Similarly, on February 10, February 26, and March 15, there were spikes in the number of transactions but no significant spike in market trades.
-2. There does seem to be a relationship between the total transaction amount and the total market volume traded on a given day. Both saw spikes on January 24, February 6, and March 1. On the other hand, on January 15, January 29, and March 18, both the total transaction amount and the market volume saw slight dips in their totals and volume.
+1. While there are days with high transaction counts, there are also days with high market trade counts. These two metrics do not consistently correlate. For example, some days with high market trade counts, such as January 24th, do not have high transaction counts. Likewise, some days with high transaction counts, such as February 10th, do not have high market trade counts.
+2. However, the total transaction amount and the total market volume traded do seem to correlate. For example, on January 24th, February 6th, and March 1st, both metrics saw spikes. Similarly, on January 15th, January 29th, and March 18th, both metrics saw dips.
